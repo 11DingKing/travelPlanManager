@@ -26,6 +26,7 @@ logger = logging.getLogger(__name__)
 class Validator:
     """输入校验类"""
     DATE_PATTERN = r'^\d{4}-\d{2}-\d{2}$'
+    TIME_PATTERN = r'^\d{2}:\d{2}$'
     
     @staticmethod
     def validate_date(date_str):
@@ -36,6 +37,28 @@ class Validator:
             return True, ""
         except ValueError:
             return False, "无效的日期，请检查年月日是否正确"
+    
+    @staticmethod
+    def validate_time(time_str):
+        if not re.match(Validator.TIME_PATTERN, time_str):
+            return False, "时间格式错误，请使用 HH:MM 格式"
+        try:
+            datetime.strptime(time_str, '%H:%M')
+            return True, ""
+        except ValueError:
+            return False, "无效的时间，请检查时分是否正确"
+    
+    @staticmethod
+    def validate_time_range(start_time, end_time):
+        valid, msg = Validator.validate_time(start_time)
+        if not valid:
+            return False, f"开始时间: {msg}"
+        valid, msg = Validator.validate_time(end_time)
+        if not valid:
+            return False, f"结束时间: {msg}"
+        if start_time >= end_time:
+            return False, "开始时间不能晚于或等于结束时间"
+        return True, ""
     
     @staticmethod
     def validate_date_range(start_date, end_date):
@@ -68,23 +91,28 @@ class Validator:
 
 class Attraction:
     """景点类"""
-    def __init__(self, name, ticket_price=0, open_time="", note=""):
+    def __init__(self, name, ticket_price=0, open_time="", note="", start_time="", end_time=""):
         self.name = name
         self.ticket_price = ticket_price
         self.open_time = open_time
         self.note = note
+        self.start_time = start_time
+        self.end_time = end_time
     
     def to_dict(self):
         return {"name": self.name, "ticket_price": self.ticket_price, 
-                "open_time": self.open_time, "note": self.note}
+                "open_time": self.open_time, "note": self.note,
+                "start_time": self.start_time, "end_time": self.end_time}
     
     @classmethod
     def from_dict(cls, data):
         return cls(data["name"], data.get("ticket_price", 0), 
-                   data.get("open_time", ""), data.get("note", ""))
+                   data.get("open_time", ""), data.get("note", ""),
+                   data.get("start_time", ""), data.get("end_time", ""))
     
     def format_line(self):
-        return f"    📍 {self.name} | ¥{self.ticket_price} | {self.open_time} | {self.note}"
+        time_info = f" [{self.start_time}-{self.end_time}]" if self.start_time and self.end_time else ""
+        return f"    📍 {self.name}{time_info} | ¥{self.ticket_price} | {self.open_time} | {self.note}"
 
 
 class DayPlan:
@@ -94,9 +122,26 @@ class DayPlan:
         self.description = description
         self.attractions = []
     
+    def _check_time_conflict(self, new_attr):
+        """检查新景点与已有景点是否有时间段冲突"""
+        if not new_attr.start_time or not new_attr.end_time:
+            return False, None
+        for existing_attr in self.attractions:
+            if not existing_attr.start_time or not existing_attr.end_time:
+                continue
+            if not (new_attr.end_time <= existing_attr.start_time or new_attr.start_time >= existing_attr.end_time):
+                return True, existing_attr
+        return False, None
+    
     def add_attraction(self, attraction):
+        has_conflict, conflict_attr = self._check_time_conflict(attraction)
+        if has_conflict:
+            msg = f"时间冲突！'{attraction.name}' ({attraction.start_time}-{attraction.end_time}) 与 '{conflict_attr.name}' ({conflict_attr.start_time}-{conflict_attr.end_time}) 时间段重叠"
+            logger.warning(msg)
+            return False, msg
         self.attractions.append(attraction)
         logger.info(f"添加景点: {attraction.name}")
+        return True, "添加成功"
     
     def remove_attraction(self, name):
         before = len(self.attractions)
@@ -483,7 +528,8 @@ def format_plan_detail(plan):
         for day in plan.day_plans:
             lines.append(f"  Day {day.day_number}: {day.description}")
             for attr in day.attractions:
-                info = f"    - {attr.name} | {attr.ticket_price}元"
+                time_info = f" [{attr.start_time}-{attr.end_time}]" if attr.start_time and attr.end_time else ""
+                info = f"    - {attr.name}{time_info} | {attr.ticket_price}元"
                 if attr.open_time:
                     info += f" | {attr.open_time}"
                 if attr.note:
@@ -555,6 +601,20 @@ def get_float_input(prompt, default=0):
         if valid:
             return result
         print(result)
+
+
+def get_time_input(prompt, optional=True):
+    while True:
+        value = input(f"> {prompt}").strip()
+        if not value and optional:
+            return ""
+        if not value and not optional:
+            print("时间不能为空")
+            continue
+        valid, msg = Validator.validate_time(value)
+        if valid:
+            return value
+        print(msg)
 
 
 def get_int_input(prompt, default=0):
@@ -630,12 +690,24 @@ def manage_day_plans(manager, plan_id, content_lines):
                 print("景点名称不能为空")
                 get_input("按回车继续...")
                 continue
+            
+            while True:
+                start_time = get_time_input("开始时间 (HH:MM，留空跳过): ", optional=True)
+                end_time = get_time_input("结束时间 (HH:MM，留空跳过): ", optional=True)
+                if start_time and end_time:
+                    valid, msg = Validator.validate_time_range(start_time, end_time)
+                    if valid:
+                        break
+                    print(msg)
+                else:
+                    break
+            
             price = get_float_input("门票价格 (默认0): ", 0)
             open_time = get_input("开放时间: ")
             note = get_input("备注: ")
-            day_plan.add_attraction(Attraction(name, price, open_time, note))
+            success, msg = day_plan.add_attraction(Attraction(name, price, open_time, note, start_time, end_time))
             manager.save_data()
-            print(f"已添加景点: {name}")
+            print(msg)
             get_input("按回车继续...")
         
         elif choice == "4":
