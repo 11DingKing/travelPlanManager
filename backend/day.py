@@ -26,6 +26,7 @@ logger = logging.getLogger(__name__)
 class Validator:
     """输入校验类"""
     DATE_PATTERN = r'^\d{4}-\d{2}-\d{2}$'
+    TIME_PATTERN = r'^\d{2}:\d{2}$'
     
     @staticmethod
     def validate_date(date_str):
@@ -36,6 +37,46 @@ class Validator:
             return True, ""
         except ValueError:
             return False, "无效的日期，请检查年月日是否正确"
+    
+    @staticmethod
+    def validate_time(time_str):
+        if not time_str:
+            return True, ""
+        if not re.match(Validator.TIME_PATTERN, time_str):
+            return False, "时间格式错误，请使用 HH:MM 格式"
+        try:
+            hour, minute = map(int, time_str.split(':'))
+            if 0 <= hour <= 23 and 0 <= minute <= 59:
+                return True, ""
+            return False, "时间值超出有效范围"
+        except ValueError:
+            return False, "无效的时间值"
+    
+    @staticmethod
+    def validate_time_range(start_time, end_time):
+        if not start_time or not end_time:
+            return True, ""
+        valid, msg = Validator.validate_time(start_time)
+        if not valid:
+            return False, f"开始时间: {msg}"
+        valid, msg = Validator.validate_time(end_time)
+        if not valid:
+            return False, f"结束时间: {msg}"
+        start_minutes = int(start_time.split(':')[0]) * 60 + int(start_time.split(':')[1])
+        end_minutes = int(end_time.split(':')[0]) * 60 + int(end_time.split(':')[1])
+        if start_minutes >= end_minutes:
+            return False, "开始时间必须早于结束时间"
+        return True, ""
+    
+    @staticmethod
+    def check_time_overlap(start1, end1, start2, end2):
+        if not start1 or not end1 or not start2 or not end2:
+            return False
+        start1_min = int(start1.split(':')[0]) * 60 + int(start1.split(':')[1])
+        end1_min = int(end1.split(':')[0]) * 60 + int(end1.split(':')[1])
+        start2_min = int(start2.split(':')[0]) * 60 + int(start2.split(':')[1])
+        end2_min = int(end2.split(':')[0]) * 60 + int(end2.split(':')[1])
+        return max(start1_min, start2_min) < min(end1_min, end2_min)
     
     @staticmethod
     def validate_date_range(start_date, end_date):
@@ -68,23 +109,28 @@ class Validator:
 
 class Attraction:
     """景点类"""
-    def __init__(self, name, ticket_price=0, open_time="", note=""):
+    def __init__(self, name, ticket_price=0, open_time="", note="", start_time="", end_time=""):
         self.name = name
         self.ticket_price = ticket_price
         self.open_time = open_time
         self.note = note
+        self.start_time = start_time
+        self.end_time = end_time
     
     def to_dict(self):
         return {"name": self.name, "ticket_price": self.ticket_price, 
-                "open_time": self.open_time, "note": self.note}
+                "open_time": self.open_time, "note": self.note,
+                "start_time": self.start_time, "end_time": self.end_time}
     
     @classmethod
     def from_dict(cls, data):
         return cls(data["name"], data.get("ticket_price", 0), 
-                   data.get("open_time", ""), data.get("note", ""))
+                   data.get("open_time", ""), data.get("note", ""),
+                   data.get("start_time", ""), data.get("end_time", ""))
     
     def format_line(self):
-        return f"    📍 {self.name} | ¥{self.ticket_price} | {self.open_time} | {self.note}"
+        time_info = f"{self.start_time}-{self.end_time}" if self.start_time and self.end_time else "未安排时间"
+        return f"    📍 {self.name} | {time_info} | ¥{self.ticket_price} | {self.open_time} | {self.note}"
 
 
 class DayPlan:
@@ -95,8 +141,23 @@ class DayPlan:
         self.attractions = []
     
     def add_attraction(self, attraction):
+        conflicting = []
+        for existing in self.attractions:
+            if Validator.check_time_overlap(
+                existing.start_time, existing.end_time,
+                attraction.start_time, attraction.end_time
+            ):
+                conflicting.append(existing)
+        
+        if conflicting:
+            conflict_names = ", ".join([c.name for c in conflicting])
+            conflict_times = ", ".join([f"{c.start_time}-{c.end_time}" for c in conflicting])
+            logger.warning(f"景点 {attraction.name} 时间冲突，与 {conflict_names} ({conflict_times}) 重叠")
+            return False, f"时间冲突！景点 {attraction.name} ({attraction.start_time}-{attraction.end_time}) 与以下景点时间重叠：{conflict_names} ({conflict_times})"
+        
         self.attractions.append(attraction)
         logger.info(f"添加景点: {attraction.name}")
+        return True, "添加成功"
     
     def remove_attraction(self, name):
         before = len(self.attractions)
@@ -483,9 +544,10 @@ def format_plan_detail(plan):
         for day in plan.day_plans:
             lines.append(f"  Day {day.day_number}: {day.description}")
             for attr in day.attractions:
-                info = f"    - {attr.name} | {attr.ticket_price}元"
+                time_info = f" | {attr.start_time}-{attr.end_time}" if attr.start_time and attr.end_time else ""
+                info = f"    - {attr.name}{time_info} | {attr.ticket_price}元"
                 if attr.open_time:
-                    info += f" | {attr.open_time}"
+                    info += f" | 开放: {attr.open_time}"
                 if attr.note:
                     info += f" | 备注: {attr.note}"
                 lines.append(info)
@@ -541,6 +603,20 @@ def get_date_input(prompt):
             print("日期不能为空")
             continue
         valid, msg = Validator.validate_date(value)
+        if valid:
+            return value
+        print(msg)
+
+
+def get_time_input(prompt, allow_empty=True):
+    while True:
+        value = input(f"> {prompt}").strip()
+        if not value:
+            if allow_empty:
+                return ""
+            print("时间不能为空")
+            continue
+        valid, msg = Validator.validate_time(value)
         if valid:
             return value
         print(msg)
@@ -625,17 +701,44 @@ def manage_day_plans(manager, plan_id, content_lines):
                 print(f"Day {day_num} 不存在，请先添加该天行程")
                 get_input("按回车继续...")
                 continue
+            
+            if day_plan.attractions:
+                print("该天已安排景点:")
+                for attr in day_plan.attractions:
+                    time_info = f"{attr.start_time}-{attr.end_time}" if attr.start_time and attr.end_time else "未安排时间"
+                    print(f"  - {attr.name}: {time_info}")
+                print()
+            
             name = get_input("景点名称: ")
             if not name:
                 print("景点名称不能为空")
                 get_input("按回车继续...")
                 continue
+            
+            while True:
+                start_time = get_time_input("开始时间 (HH:MM，回车跳过): ", allow_empty=True)
+                end_time = get_time_input("结束时间 (HH:MM，回车跳过): ", allow_empty=True)
+                
+                if start_time and end_time:
+                    valid, msg = Validator.validate_time_range(start_time, end_time)
+                    if valid:
+                        break
+                    print(msg)
+                elif not start_time and not end_time:
+                    break
+                else:
+                    print("请同时设置开始时间和结束时间，或都留空")
+            
             price = get_float_input("门票价格 (默认0): ", 0)
             open_time = get_input("开放时间: ")
             note = get_input("备注: ")
-            day_plan.add_attraction(Attraction(name, price, open_time, note))
+            
+            success, msg = day_plan.add_attraction(Attraction(name, price, open_time, note, start_time, end_time))
             manager.save_data()
-            print(f"已添加景点: {name}")
+            if success:
+                print(f"已添加景点: {name}")
+            else:
+                print(f"添加失败: {msg}")
             get_input("按回车继续...")
         
         elif choice == "4":
